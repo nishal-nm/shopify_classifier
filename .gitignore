@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+.venv/
+*.sqlite3
+*.log
+.DS_Store
+Thumbs.db
+node_modules/
+staticfiles/
+media/
