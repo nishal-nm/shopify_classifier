@@ -17,7 +17,7 @@ class Command(BaseCommand):
         limit = options["limit"]
         
         products_query = Product.objects.exclude(
-            classifications__status__in=["COMPLETED", "APPROVED", "REVIEW"]
+            classifications__status__in=["COMPLETED", "APPROVED", "REVIEW", "FAILED"]
         )
         
         total_count = products_query.count()
@@ -67,29 +67,49 @@ class Command(BaseCommand):
                         classification.error = (classification.error or "") + err_msg
                         classification.save()
 
-            search_text = f"{product.product_name} {product.product_category} {product.product_sub_category} {product.product_description}".lower()
+            image_keywords = ""
+            if product.image_urls:
+                import re
+                for url in product.image_urls:
+                    try:
+                        filename = url.split('/')[-1]
+                        filename = filename.split('.')[0]
+                        parts = re.split(r'[^a-zA-Z0-9]+', filename)
+                        image_keywords += " " + " ".join(parts)
+                    except:
+                        pass
+
+            search_text = f"{product.product_name} {product.brand} {product.product_category} {product.product_sub_category} {product.product_description} {image_keywords}".lower()
             words = set([w for w in search_text.split() if len(w) > 3])
             
-            matching_categories = TaxonomyCategory.objects.filter(is_leaf=True)
-            
-            # Gather candidates
-            candidate_qs = matching_categories.filter(name__icontains=product.product_category)[:10]
-            if not candidate_qs:
-                candidate_qs = matching_categories.filter(name__icontains=product.product_sub_category)[:10]
-            if not candidate_qs and words:
-                first_word = list(words)[0]
-                candidate_qs = matching_categories.filter(name__icontains=first_word)[:5]
-                
+            # We load leaf categories in handle() and store them as self.leaf_categories
+            # but if they aren't loaded, load them
+            if not hasattr(self, 'leaf_categories'):
+                self.leaf_categories = list(TaxonomyCategory.objects.filter(is_leaf=True))
+                for cat in self.leaf_categories:
+                    cat.search_words = set(f"{cat.name} {cat.full_name}".lower().replace('>', ' ').split())
+
             candidates = []
-            for cat in candidate_qs:
-                cat_text = f"{cat.name} {cat.full_name}".lower()
-                cat_words = set(cat_text.replace('>', ' ').split())
-                overlap = words.intersection(cat_words)
-                score = len(overlap) / max(len(words), 1) if words else 0
-                # Give a baseline score if we found it via icontains
-                score = min(score + 0.4, 0.99)
-                candidates.append((cat, score))
-                
+            for cat in self.leaf_categories:
+                overlap = words.intersection(cat.search_words)
+                if overlap:
+                    # Give 0.3 score per matching word up to 0.9
+                    base_score = min(0.9, len(overlap) * 0.3)
+                    
+                    # Tiny penalty for very long descriptions so short precise matches win ties
+                    desc_penalty = min(len(words) * 0.001, 0.1)
+                    score = base_score - desc_penalty
+                    
+                    if score > 0.1: 
+                        candidates.append((cat, score))
+            
+            # Boost score if category or sub_category matches perfectly or partially
+            for i, (cat, score) in enumerate(candidates):
+                if product.product_category and product.product_category.lower() in cat.name.lower():
+                    candidates[i] = (cat, min(score + 0.4, 0.99))
+                elif product.product_sub_category and product.product_sub_category.lower() in cat.name.lower():
+                    candidates[i] = (cat, min(score + 0.3, 0.99))
+            
             if not candidates:
                 classification.status = "REVIEW"
                 classification.error = (classification.error or "") + "No matching category found\n"

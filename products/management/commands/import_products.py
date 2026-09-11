@@ -19,11 +19,16 @@ class Command(BaseCommand):
         # Replace NaN with empty string/None where appropriate
         df = df.replace({np.nan: None})
         
-        batch = ProductBatch.objects.create(
-            name=f"Import {file_path}",
-            status="PENDING",
-            total_products=len(df)
-        )
+        batch = ProductBatch.objects.filter(status="PENDING").order_by('-created_at').first()
+        if not batch:
+            batch = ProductBatch.objects.create(
+                name=f"Import {file_path}",
+                status="PENDING",
+                total_products=len(df)
+            )
+        else:
+            batch.total_products = len(df)
+            batch.save()
         
         products_to_create = []
         for index, row in df.iterrows():
@@ -47,6 +52,7 @@ class Command(BaseCommand):
                 collection_name=str(row.get("Collection Name", "") or ""),
                 color_collection=str(row.get("Color Collection", "") or ""),
                 product_color=str(row.get("Product Color", "") or ""),
+                brand=str(row.get("Brand", "") or ""),
                 product_name=str(row.get("Product Name", "")),
                 product_description=str(row.get("Product Description ", "") or ""), # Notice trailing space in col name
                 bullets=str(row.get("Bullets", "") or ""),

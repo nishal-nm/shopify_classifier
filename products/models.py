@@ -39,6 +39,11 @@ class Product(models.Model):
     )
 
     # Product information
+    brand = models.CharField(
+        max_length=255,
+        blank=True,
+    )
+
     product_name = models.CharField(
         max_length=500,
     )
