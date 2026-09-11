@@ -1,94 +1,58 @@
-# Python Developer Online Test - Candidate Questions & Answers
+1. **What approach would you use to automatically identify the Shopify category, attributes, and attribute values? Explain your approach and why you selected it.**
+I implemented a keyword-based set intersection algorithm. The system loads all Shopify leaf categories into memory, tokenizes their names into keywords, and performs a mathematical intersection against a massive string built from the product's title, description, brand, and type. I chose this approach over paid third-party AI APIs because it is incredibly fast, deterministic, doesn't rely on internet latency, and allows for manual heuristic tuning (like giving score boosts for exact substring matches).
 
-## 1. What approach would you use to automatically identify the Shopify category, attributes, and attribute values? Explain your approach and why you selected it.
-**Approach**: I would use a hybrid approach combining heuristic text search and a Large Language Model (LLM). First, I would match explicit category keywords from the product's internal `Product Category` and `Product Sub Category` with Shopify taxonomy categories. If an exact match is found, we can assign it instantly. For items that don't match or have ambiguous titles/descriptions, I would pass the product details (Title, Description, Brand, Product Type) to an LLM (like OpenAI's GPT-4o-mini or Gemini 1.5 Flash). We can prompt the LLM to output the closest matching category ID from the taxonomy.
-**Why**: Heuristics solve the majority of easy cases quickly and cheaply. LLMs excel at understanding context and semantics (e.g. mapping "Sofa" to "Furniture > Sofas") even with missing or unstructured data.
+2. **How would you handle a product that has a title but no description and no image?**
+Our scoring engine treats all available text fields as a single pool of searchable words. If the description and image are missing, the algorithm seamlessly operates using just the words from the product title and brand, gracefully falling back without throwing any errors.
 
-## 2. How would you handle a product that has a title but no description and no image?
-The LLM or classification logic relies on the title, product category, and sub-category. Often, a product title like "Empress Bonded Leather Sofa" contains enough semantic information (e.g. "Sofa") to identify the category. If the information is too sparse, the system will mark the product's classification status as `REVIEW` with a low confidence score, flagging it for manual approval by a human.
+3. **How would you use product images to improve classification when an image is available?**
+Since processing raw images through computer vision is heavy, I extract semantic value from the image URL itself. For example, a URL like `.../Mens-Running-Shoes-123.jpg` is parsed and cleaned using regex to extract keywords like "Mens Running Shoes". These keywords are directly injected into the text-matching algorithm to heavily boost accuracy.
 
-## 3. How would you use product images to improve classification when an image is available?
-When using an LLM that supports vision (like GPT-4o or Gemini 1.5 Pro), product images can be included in the prompt. The visual context allows the model to correctly identify products where the text description is vague or misleading, ensuring a much higher confidence classification.
+4. **How would you design the application to process 10,000+ products efficiently? Explain your approach for batch/background processing.**
+I utilized a decoupled asynchronous approach. When an Excel file is uploaded, an API endpoint uses Pandas to synchronously read the file and execute a high-speed database `bulk_create`. It immediately returns a success response and spawns a background Python daemon thread. This background thread processes the classifications in database chunks (e.g., 100 products at a time) to prevent memory bloat, while the frontend continuously polls a lightweight status API to show a live progress bar.
 
-## 4. How would you design the application to process 10,000+ products efficiently? Explain your approach for batch/background processing.
-I would implement background task processing using **Celery** and a message broker like **Redis** or **RabbitMQ**. 
-- Products are broken down into manageable chunks (e.g., batches of 100).
-- Celery worker nodes pull these chunks from the queue, allowing concurrent processing.
-- Database transactions would be handled efficiently using `bulk_create` and `bulk_update` to reduce database overhead.
-- This decoupling ensures the main web application remains responsive.
+5. **How would you store the Shopify taxonomy and its category hierarchy in the database?**
+I used a normalized relational database design via Django Models. A `TaxonomyCategory` model handles the hierarchy using a self-referential `parent` ForeignKey. Attributes and their allowed values are stored in `TaxonomyAttribute` and `TaxonomyAttributeValue` models, which are linked to categories through a many-to-many `CategoryAttribute` mapping table.
 
-## 5. How would you store the Shopify taxonomy and its category hierarchy in the database?
-I would use a relational database model with a self-referential foreign key for categories.
-```python
-class TaxonomyCategory(models.Model):
-    external_id = models.CharField(max_length=255, unique=True)
-    name = models.CharField(max_length=255)
-    parent = models.ForeignKey('self', null=True, blank=True, on_delete=models.PROTECT, related_name='children')
-    level = models.PositiveIntegerField(default=0)
-    is_leaf = models.BooleanField(default=False)
-```
-This enables querying full category paths and finding leaf nodes. For attributes, a many-to-many relationship mapping categories to attributes works best.
+6. **How would you calculate or determine the confidence score for a classification?**
+I calculate it using a tiered mathematical heuristic. First, I award a base score (e.g., +30% confidence) for every overlapping keyword between the product and the category name. Then, I apply a tiny mathematical penalty based on the length of the product description so that highly precise matches win ties. Finally, I apply massive percentage boosts (e.g., +40%) if the exact category name appears in the original "Product Type" column.
 
-## 6. How would you calculate or determine the confidence score for a classification?
-If using an LLM, the model can be prompted to return a confidence score (0.0 to 1.0) along with its classification. 
-For heuristic search, the score can be calculated based on the matching criteria:
-- Exact match on category + sub-category: `0.9 - 1.0`
-- Match on title keywords: `0.6 - 0.8`
-- Fuzzy/partial match: `0.3 - 0.5`
+7. **What would you do when the system cannot confidently identify a single category?**
+If a product's highest confidence score falls below a set threshold (50%), the system assigns the product a `REVIEW` status rather than `COMPLETED`. Additionally, the system captures the 2nd and 3rd place runner-up categories and saves them into a `ClassificationAlternative` table. The frontend UI then displays these alternatives in a dropdown, allowing a human administrator to quickly select the correct category.
 
-## 7. What would you do when the system cannot confidently identify a single category?
-The system would store the top N most likely categories as `ClassificationAlternative` records in the database. The classification status would be set to `REVIEW`. In the UI, the admin will see these alternative suggestions and can quickly approve the correct one.
+8. **How would you handle a broken or inaccessible product image without stopping the complete batch?**
+Every individual product classification is wrapped in a dedicated `try/except` block inside the chunk loop. If an image parsing step or database commit throws an exception, the system catches it, flags that specific product's status as `FAILED`, saves the error trace, and immediately moves on to the next product. A single bad row will never crash the batch.
 
-## 8. How would you handle a broken or inaccessible product image without stopping the complete batch?
-The background task would be wrapped in a `try...except` block when downloading or passing the image to the LLM. If an image fails to load (e.g. 404 error, timeout), the exception is caught, logged as a warning, and the system gracefully falls back to classifying the product using its text data only. The overall batch loop continues seamlessly.
+9. **How would you design the API and database structure for this application?**
+**Database:** Separated into `Product` (raw imported data), `TaxonomyCategory` (the Shopify master list), and `Classification` (the mapping between the two).
+**API:** Designed as RESTful endpoints using Django REST Framework. Includes `/api/upload/` for file parsing, `/api/status/` for live background tracking, and a paginated `/api/classifications/` viewset that serves the data in chunks of 50 to prevent frontend browser freezing.
 
-## 9. How would you design the API and database structure for this application?
-**Database**:
-- `Product`: Stores imported product data.
-- `TaxonomyCategory` / `TaxonomyAttribute`: Stores the Shopify taxonomy.
-- `Classification`: Links a Product to a TaxonomyCategory. Fields: `confidence`, `status` (PENDING, PROCESSING, COMPLETED, REVIEW, FAILED), `error`.
-- `ClassificationAlternative`: Stores fallback categories.
+10. **If the application needs to process 10,000 products and each external AI/API request takes approximately 2 seconds, how would you optimize the processing time?**
+Instead of processing them sequentially (which would take 20,000 seconds / ~5.5 hours), I would integrate a message broker like Redis and a task queue like Celery. By spinning up a pool of 20 to 50 concurrent worker threads, the system can fire off API requests in parallel, slashing the processing time down to a matter of minutes.
 
-**API (Django REST Framework)**:
-- `GET /api/classifications/` - List classifications (can filter by status e.g. `?status=REVIEW`).
-- `PATCH /api/classifications/{id}/` - Update category manually.
-- `POST /api/classifications/{id}/approve/` - Mark as approved.
+11. **How would you design the system so that if processing fails after 6,000 products, it can resume from the remaining products instead of starting again?**
+Our background script is fully stateless and database-driven. The core query asks the database for `Product.objects.exclude(classifications__status__in=["COMPLETED", "APPROVED", "REVIEW", "FAILED"])`. Because it strictly queries for rows that have absolutely no status, restarting the server or script automatically ignores the first 6,000 processed items and seamlessly resumes processing from product 6,001.
 
-## 10. If the application needs to process 10,000 products and each external AI/API request takes approximately 2 seconds, how would you optimize the processing time?
-10,000 products * 2s = ~5.5 hours sequentially. 
-To optimize:
-- **Concurrency**: Use Celery with multiple worker processes, or `asyncio` (`aiohttp`) to make concurrent API requests (e.g., 50 parallel requests). This can reduce the time from 5.5 hours to ~7 minutes.
-- **Batching APIs**: If the LLM API supports batch requests, group multiple products into a single API call.
-- **Caching**: Cache identical or highly similar product classifications to avoid redundant API calls.
+12. **What technologies/frameworks would you choose for this application, and why?**
+- **Backend:** Python + Django + Django REST Framework. Chosen for its robust built-in ORM, excellent management commands (for cron/background tasks), and blazing-fast API scaffolding.
+- **Frontend:** Vanilla HTML + JavaScript + Tailwind CSS. Chosen because the UI requirements (tables, progress bars) can be built incredibly cleanly and professionally without the heavy overhead and build-steps of React or Vue.
+- **Database:** SQLite (easily upgradable to PostgreSQL for production) due to its zero-configuration local setup.
 
-## 11. How would you design the system so that if processing fails after 6,000 products, it can resume from the remaining products instead of starting again?
-The batch script or Celery task queries the database for products that have `status='PENDING'` or `status='FAILED'`. As each product is successfully processed, its status is updated to `COMPLETED` or `REVIEW` and saved to the database. If the process crashes at 6,000, restarting the task will automatically fetch the remaining 4,000 `PENDING` products.
+13. **Provide a high-level architecture/design for the complete application.**
+1. **Client Layer:** A responsive Tailwind UI that posts files and polls for JSON status updates.
+2. **API Layer:** Django views that securely handle file uploads, trigger background tasks, and serve paginated data.
+3. **Worker Layer:** Python threading executing the classification engine in memory-safe chunks.
+4. **Data Layer:** A relational SQL database enforcing strict foreign keys between raw products, calculated classifications, and the Shopify taxonomy tree.
 
-## 12. What technologies/frameworks would you choose for this application, and why?
-- **Backend**: Python & Django. Excellent ORM, built-in admin panel, and rapid development capabilities.
-- **Database**: MySQL/MariaDB for structured data storage, optimized index querying.
-- **API**: Django REST Framework.
-- **Task Queue**: Celery + Redis for reliable background processing.
-- **Frontend**: React (or simple Django Templates/Bootstrap for a prototype) to quickly build a responsive UI for review.
+14. **Provide a realistic development effort estimation in hours, including a task-wise breakdown for developing this as a production-ready application. Mention your assumptions and major dependencies/risks.**
+- **Database Architecture & Models:** 4 hours
+- **Shopify Taxonomy Parsing/Loading Script:** 3 hours
+- **Core Classification Engine & Heuristics:** 6 hours
+- **REST APIs & Background Processing:** 4 hours
+- **Frontend UI (Skeleton loaders, pagination, status bars):** 6 hours
+- **Testing, Error Handling & Refactoring:** 4 hours
+- **Total:** ~27 hours.
+- *Assumptions:* The provided Shopify JSON taxonomy is well-formed. 
+- *Risks:* Highly generic product titles with massive descriptions could dilute keyword matching, requiring ongoing fine-tuning of the heuristic math.
 
-## 13. Provide a high-level architecture/design for the complete application.
-1. **User Interface**: React SPA or Django Views for uploading files and reviewing classifications.
-2. **API Layer**: DRF endpoints handling file uploads, triggering batch jobs, and fetching paginated results.
-3. **Task Queue**: Celery workers picking up tasks to parse Excel, load taxonomy, and process classification.
-4. **Classification Engine**: A module that first attempts heuristic matching, then prepares a prompt with text + images and calls the LLM API asynchronously.
-5. **Data Layer**: MariaDB storing Products, Taxonomy, and Classifications.
-
-## 14. Provide a realistic development effort estimation in hours, including a task-wise breakdown for developing this as a production-ready application.
-- **Database & Models setup**: 4 hours
-- **Taxonomy Import scripts**: 4 hours
-- **Product Import & Data Cleaning**: 4 hours
-- **Classification Engine (Heuristics + LLM integration)**: 12 hours
-- **Background Jobs (Celery/Redis setup)**: 6 hours
-- **API endpoints**: 4 hours
-- **Frontend Dashboard & Review UI**: 12 hours
-- **Testing & Error Handling**: 8 hours
-- **Deployment & CI/CD**: 6 hours
-**Total**: ~60 hours.
-
-## 15. Practical Task: Develop a working prototype...
-*(See implemented codebase in this project.)*
+15. **Practical Task: Develop a working prototype that demonstrates the above functionality using the sample product list provided.**
+Completed. The system accurately imports products, visually tracks background processing progress, applies mathematical heuristics to match against the Shopify taxonomy, and provides a polished UI for reviewing alternatives and approving results.
