@@ -1,8 +1,8 @@
 import time
 from django.core.management.base import BaseCommand
 from products.models import Product
-from taxonomy.models import TaxonomyCategory
-from classification.models import Classification, ClassificationAlternative
+from taxonomy.models import TaxonomyCategory, CategoryAttribute
+from classification.models import Classification, ClassificationAlternative, ProductAttribute
 from django.db import transaction
 
 class Command(BaseCommand):
@@ -16,23 +16,30 @@ class Command(BaseCommand):
         batch_size = options["batch_size"]
         limit = options["limit"]
         
-        # Get products that haven't been successfully classified or approved
-        # This allows resuming processing
         products_query = Product.objects.exclude(
             classifications__status__in=["COMPLETED", "APPROVED"]
         )
         
-        if limit > 0:
-            products_query = products_query[:limit]
-            
         total_count = products_query.count()
+        if limit > 0:
+            total_count = min(total_count, limit)
+            
         self.stdout.write(f"Found {total_count} products to classify.")
         
         processed = 0
         
-        for i in range(0, total_count, batch_size):
-            batch_products = products_query[i:i+batch_size]
-            
+        while True:
+            chunk_size = batch_size
+            if limit > 0:
+                remaining = limit - processed
+                if remaining <= 0:
+                    break
+                chunk_size = min(batch_size, remaining)
+                
+            batch_products = list(products_query[:chunk_size])
+            if not batch_products:
+                break
+                
             for product in batch_products:
                 try:
                     self.classify_product(product)
@@ -49,51 +56,52 @@ class Command(BaseCommand):
         )
         
         try:
-            # Simulate a 2 second API call if we were using AI
-            # time.sleep(2)  # Commented out for fast execution in demo
-            
-            # Simple heuristic classification based on title/category keywords
-            search_text = f"{product.product_name} {product.product_category} {product.product_sub_category}".lower()
-            
-            # Very basic search logic
-            # In a real scenario, this would call an LLM with product text and image URLs
-            matching_categories = TaxonomyCategory.objects.filter(is_leaf=True)
-            
-            best_match = None
-            best_score = 0
-            
-            # Just grab some categories to simulate matches
-            # Let's search if any words match
+            # Image handling validation
+            if product.image_urls:
+                for url in product.image_urls:
+                    try:
+                        if not isinstance(url, str) or not url.strip() or not url.startswith('http'):
+                            raise ValueError(f"Invalid or malformed image URL: {url}")
+                    except Exception as img_err:
+                        err_msg = f"Image validation failed: {img_err}\n"
+                        classification.error = (classification.error or "") + err_msg
+                        classification.save()
+
+            search_text = f"{product.product_name} {product.product_category} {product.product_sub_category} {product.product_description}".lower()
             words = set([w for w in search_text.split() if len(w) > 3])
             
-            candidates = []
-            for cat in matching_categories.filter(name__icontains=product.product_category)[:10]:
-                candidates.append((cat, 0.8))
+            matching_categories = TaxonomyCategory.objects.filter(is_leaf=True)
             
-            if not candidates:
-                for cat in matching_categories.filter(name__icontains=product.product_sub_category)[:10]:
-                    candidates.append((cat, 0.6))
-                    
-            if not candidates and words:
-                # fallback
+            # Gather candidates
+            candidate_qs = matching_categories.filter(name__icontains=product.product_category)[:10]
+            if not candidate_qs:
+                candidate_qs = matching_categories.filter(name__icontains=product.product_sub_category)[:10]
+            if not candidate_qs and words:
                 first_word = list(words)[0]
-                for cat in matching_categories.filter(name__icontains=first_word)[:5]:
-                    candidates.append((cat, 0.4))
-                    
+                candidate_qs = matching_categories.filter(name__icontains=first_word)[:5]
+                
+            candidates = []
+            for cat in candidate_qs:
+                cat_text = f"{cat.name} {cat.full_name}".lower()
+                cat_words = set(cat_text.replace('>', ' ').split())
+                overlap = words.intersection(cat_words)
+                score = len(overlap) / max(len(words), 1) if words else 0
+                # Give a baseline score if we found it via icontains
+                score = min(score + 0.4, 0.99)
+                candidates.append((cat, score))
+                
             if not candidates:
-                # If still nothing, assign a default or mark for review
                 classification.status = "REVIEW"
-                classification.error = "No matching category found"
+                classification.error = (classification.error or "") + "No matching category found\n"
                 classification.save()
                 return
                 
-            # Sort candidates by score
             candidates.sort(key=lambda x: x[1], reverse=True)
             best_cat, best_score = candidates[0]
             
             classification.category = best_cat
             classification.confidence = best_score
-            classification.status = "COMPLETED" if best_score > 0.7 else "REVIEW"
+            classification.status = "COMPLETED" if best_score > 0.5 else "REVIEW"
             classification.save()
             
             # Save alternatives
@@ -106,8 +114,30 @@ class Command(BaseCommand):
                     rank=idx + 1
                 )
                 
+            # Attribute detection
+            ProductAttribute.objects.filter(classification=classification).delete()
+            product_full_text = f"{product.product_name} {product.product_description} {product.bullets} {product.materials}".lower()
+            
+            cat_attrs = CategoryAttribute.objects.filter(category=best_cat).select_related('attribute')
+            for cat_attr in cat_attrs:
+                attribute = cat_attr.attribute
+                matched_val = None
+                
+                # Check taxonomy values
+                for val in attribute.values.all():
+                    if val.name.lower() in product_full_text:
+                        matched_val = val
+                        break
+                        
+                ProductAttribute.objects.create(
+                    classification=classification,
+                    attribute=attribute,
+                    value=matched_val,
+                    confidence=0.8 if matched_val else 0.1
+                )
+                
         except Exception as e:
             classification.status = "FAILED"
-            classification.error = str(e)
+            classification.error = (classification.error or "") + f"Exception: {str(e)}\n"
             classification.save()
             raise e
