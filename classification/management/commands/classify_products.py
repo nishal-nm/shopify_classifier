@@ -17,7 +17,7 @@ class Command(BaseCommand):
         limit = options["limit"]
         
         products_query = Product.objects.exclude(
-            classifications__status__in=["COMPLETED", "APPROVED"]
+            classifications__status__in=["COMPLETED", "APPROVED", "REVIEW"]
         )
         
         total_count = products_query.count()
