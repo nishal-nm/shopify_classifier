@@ -56,7 +56,7 @@ If you prefer to bypass the web UI, you can trigger the engine directly via the 
 
 **To import products from an Excel file:**
 ```bash
-python manage.py import_products "docs\Product_List.xlsx"
+python manage.py import_products "data\Product_List.xlsx"
 ```
 
 **To run the classification engine on unclassified products:**
